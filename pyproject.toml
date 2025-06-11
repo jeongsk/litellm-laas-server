@@ -1,0 +1,10 @@
+[project]
+name = "litellm-laas-server"
+version = "0.1.0"
+description = "LiteLLM integration for Wanted LaaS API"
+requires-python = ">=3.9"
+dependencies = [
+    "litellm[proxy]==1.72.4",
+    "python-dotenv==1.1.0",
+    "httpx==0.28.1"
+]

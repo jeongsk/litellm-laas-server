@@ -1,0 +1,17 @@
+### Get Models
+GET http://localhost:4000/v1/models
+
+
+### Compoletions
+POST http://localhost:4000/v1/chat/completions
+Content-Type: application/json
+
+{
+    "model": "claude-4-sonnet",
+    "messages": [
+      {
+        "role": "user",
+        "content": "안녕하세요! 테스트 메시지입니다."
+      }
+    ]
+  }

@@ -1,0 +1,9 @@
+model_list:
+  - model_name: claude-4-sonnet
+    litellm_params:
+      model: laas/claude-4-sonnet
+litellm_settings:
+  set_verbose: True
+  custom_provider_map:
+    - provider: "laas"
+      custom_handler: laas_proxy_server.laas
