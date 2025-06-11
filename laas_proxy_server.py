@@ -6,16 +6,19 @@ LaaS API를 LiteLLM CustomLLM으로 제공하는 커스텀 핸들러
 import os
 import logging
 import asyncio
-from typing import List, Dict, Union, AsyncGenerator, AsyncIterator
+from typing import List, Dict, Union, AsyncIterator
 from dotenv import load_dotenv
 import httpx
 import litellm
 from litellm import CustomLLM
-from litellm.types.utils import ModelResponse, Delta, GenericStreamingChunk
+from litellm.types.utils import ModelResponse, GenericStreamingChunk
 
 
 # .env 파일에서 환경 변수 로드
 load_dotenv()
+
+# 상수 정의
+DEFAULT_TIMEOUT = 600.0  # 10분 (초 단위)
 
 # 로거 설정
 os.environ["LITELLM_LOG"] = os.getenv("LITELLM_LOG", "INFO")
@@ -61,6 +64,29 @@ class LaaSProxy(CustomLLM):
             logger.error(error_msg)
             raise CustomLLMError(status_code=500, message=error_msg)
 
+    def _validate_messages(self, messages: List[Dict]) -> None:
+        """메시지 역할 유효성 검사"""
+        logger.debug("메시지 역할 유효성 검사 시작")
+        valid_roles = {"user", "assistant", "system"}
+        for i, msg in enumerate(messages):
+            if msg.get("role") not in valid_roles:
+                logger.error(f"잘못된 역할 발견 - 메시지 {i}: '{msg['role']}'")
+                raise CustomLLMError(
+                    status_code=400,
+                    message=f"Invalid role '{msg['role']}'. Only 'user', 'assistant', 'system' allowed",
+                )
+        logger.debug("메시지 역할 유효성 검사 완료")
+
+    def _validate_tool_calls(self, messages: List[Dict]) -> None:
+        """도구 호출 지원 확인"""
+        if any("tool_calls" in msg for msg in messages):
+            logger.warning(
+                "도구 호출 요청이 거부됨 - LaaS API는 도구 호출을 지원하지 않음"
+            )
+            raise CustomLLMError(
+                status_code=400, message="LaaS API does not support tool calls"
+            )
+
     def completion(self, *args, **kwargs) -> ModelResponse:
         """동기 completion 메서드 - 비동기 메서드 호출"""
         import asyncio
@@ -86,86 +112,22 @@ class LaaSProxy(CustomLLM):
                 message="Streaming requests should use astreaming() method",
             )
 
-        # 메시지 역할 유효성 검사
-        logger.debug("메시지 역할 유효성 검사 시작")
-        valid_roles = {"user", "assistant", "system"}
-        for i, msg in enumerate(messages):
-            if msg.get("role") not in valid_roles:
-                logger.error(f"잘못된 역할 발견 - 메시지 {i}: '{msg['role']}'")
-                raise CustomLLMError(
-                    status_code=400,
-                    message=f"Invalid role '{msg['role']}'. Only 'user', 'assistant', 'system' allowed",
-                )
-        logger.debug("메시지 역할 유효성 검사 완료")
-
-        # 도구 호출 지원 확인
-        if any("tool_calls" in msg for msg in messages):
-            logger.warning(
-                "도구 호출 요청이 거부됨 - LaaS API는 도구 호출을 지원하지 않음"
-            )
-            raise CustomLLMError(
-                status_code=400, message="LaaS API does not support tool calls"
-            )
-
-        # 요청 헤더 준비
-        headers = {
-            "project": self.project_code,
-            "apiKey": self.api_key,
-            "Content-Type": "application/json",
-        }
-
-        # 메시지 변환
-        transformed_messages = self._transform_messages(messages)
-
-        # optional_params에서 LaaS API의 params로 매핑
-        laas_params = {}
-        if optional_params:
-            for key, value in optional_params.items():
-                if key not in ["model", "messages", "stream"]:  # 기본 파라미터 제외
-                    laas_params[key] = value
-
-        # LaaS API 요청 데이터 구성
-        data = {
-            **laas_params,
-            "hash": self.preset_hash,
-            "messages": transformed_messages,
-        }
+        # 유효성 검사
+        self._validate_messages(messages)
+        self._validate_tool_calls(messages)
 
         try:
-            api_url = f"{self.base_url}/chat/completions"
-
-            async with httpx.AsyncClient(timeout=60.0) as client:
-                response = await client.post(api_url, headers=headers, json=data)
-
-            response.raise_for_status()
-
-            response_data = response.json()
+            # LaaS API 호출하여 전체 응답 받기
+            response_data = await self._call_laas_api(model, messages, optional_params)
 
             # 응답을 LiteLLM ModelResponse로 변환
             model_response = self._transform_to_model_response(response_data, model)
 
             return model_response
 
-        except httpx.TimeoutException as e:
-            logger.error(f"LaaS API 타임아웃 오류: {str(e)}")
-            raise CustomLLMError(status_code=504, message=f"LaaS API timeout: {str(e)}")
-        except httpx.ConnectError as e:
-            logger.error(f"LaaS API 연결 오류: {str(e)}")
-            raise CustomLLMError(
-                status_code=503, message=f"LaaS API connection error: {str(e)}"
-            )
-        except httpx.HTTPStatusError as e:
-            logger.error(f"LaaS API HTTP 오류: {str(e)}, 응답: {e.response.text}")
-            raise CustomLLMError(
-                status_code=e.response.status_code,
-                message=f"LaaS API HTTP error: {str(e)}",
-            )
-        except httpx.RequestError as e:
-            logger.error(f"LaaS API 요청 오류: {str(e)}")
-            raise CustomLLMError(status_code=500, message=f"LaaS API error: {str(e)}")
         except Exception as e:
             logger.error(f"예상치 못한 오류 발생: {str(e)}")
-            raise CustomLLMError(status_code=500, message=f"Unexpected error: {str(e)}")
+            raise
 
     async def astreaming(self, *args, **kwargs) -> AsyncIterator[GenericStreamingChunk]:
         """비동기 스트리밍 메서드 - LiteLLM CustomLLM 표준 인터페이스"""
@@ -173,23 +135,9 @@ class LaaSProxy(CustomLLM):
         messages = kwargs.get("messages", [])
         optional_params = kwargs.get("optional_params", {})
 
-        valid_roles = {"user", "assistant", "system"}
-        for i, msg in enumerate(messages):
-            if msg.get("role") not in valid_roles:
-                logger.error(f"잘못된 역할 발견 - 메시지 {i}: '{msg['role']}'")
-                raise CustomLLMError(
-                    status_code=400,
-                    message=f"Invalid role '{msg['role']}'. Only 'user', 'assistant', 'system' allowed",
-                )
-
-        # 도구 호출 지원 확인
-        if any("tool_calls" in msg for msg in messages):
-            logger.warning(
-                "도구 호출 요청이 거부됨 - LaaS API는 도구 호출을 지원하지 않음"
-            )
-            raise CustomLLMError(
-                status_code=400, message="LaaS API does not support tool calls"
-            )
+        # 유효성 검사
+        self._validate_messages(messages)
+        self._validate_tool_calls(messages)
 
         try:
             full_response_data = await self._call_laas_api(
@@ -281,7 +229,7 @@ class LaaSProxy(CustomLLM):
         try:
             api_url = f"{self.base_url}/chat/completions"
 
-            async with httpx.AsyncClient(timeout=60.0) as client:
+            async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
                 response = await client.post(api_url, headers=headers, json=data)
 
             response.raise_for_status()
@@ -305,64 +253,6 @@ class LaaSProxy(CustomLLM):
             logger.error(f"LaaS API 호출 중 오류: {str(e)}")
             raise CustomLLMError(status_code=500, message=f"LaaS API error: {str(e)}")
 
-    async def _stream_content(
-        self, content: str, model: str, response_id: str, created: int, usage: Dict
-    ) -> AsyncGenerator[ModelResponse, None]:
-        """응답 내용을 청크로 분할하여 스트리밍"""
-
-        # 응답을 단어 단위로 분할
-        words = content.split()
-        chunk_size = max(1, len(words) // 20)  # 약 20개의 청크로 분할
-
-        for i in range(0, len(words), chunk_size):
-            chunk_words = words[i : i + chunk_size]
-            chunk_content = " ".join(chunk_words)
-
-            # 첫 번째 청크가 아니면 앞에 공백 추가
-            if i > 0:
-                chunk_content = " " + chunk_content
-
-            # 스트리밍 청크 생성
-            chunk_response = ModelResponse(
-                id=response_id,
-                object="chat.completion.chunk",
-                created=created,
-                model=model,
-                choices=[
-                    litellm.Choices(
-                        index=0,
-                        delta=Delta(content=chunk_content),
-                        finish_reason=None,
-                    )
-                ],
-            )
-
-            yield chunk_response
-
-            # 자연스러운 스트리밍을 위한 짧은 지연
-            await asyncio.sleep(0.05)
-
-        # 마지막 청크 - 종료 신호와 사용량 정보
-        final_chunk = ModelResponse(
-            id=response_id,
-            object="chat.completion.chunk",
-            created=created,
-            model=model,
-            choices=[
-                litellm.Choices(
-                    index=0,
-                    delta=Delta(),
-                    finish_reason="stop",
-                )
-            ],
-            usage=litellm.Usage(
-                prompt_tokens=usage.get("prompt_tokens", 0),
-                completion_tokens=usage.get("completion_tokens", 0),
-                total_tokens=usage.get("total_tokens", 0),
-            ),
-        )
-
-        yield final_chunk
 
     def _transform_messages(self, messages: List[Dict]) -> List[Dict]:
         """메시지를 LaaS API 형식으로 변환"""
@@ -437,7 +327,7 @@ class LaaSProxy(CustomLLM):
                     prompt_tokens=usage.get("prompt_tokens", 0),
                     completion_tokens=usage.get("completion_tokens", 0),
                     total_tokens=usage.get("total_tokens", 0),
-                ),
+                )
             )
 
             return model_response
