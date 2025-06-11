@@ -1,32 +1,18 @@
-version: '3.8'
-
 services:
   litellm-laas-server:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    build: .
     container_name: litellm-laas-server
     ports:
       - "${PORT:-4000}:4000"
-    environment:
-      - LAAS_PROJECT_CODE=${LAAS_PROJECT_CODE}
-      - LAAS_API_KEY=${LAAS_API_KEY}
-      - LAAS_PRESET_HASH=${LAAS_PRESET_HASH}
     env_file:
       - .env
     restart: always
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:4000/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:4000/v1/models"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 40s
-    command: ["uv", "run", "python", "start_litellm.py", "--config", "/app/config.yaml", "--host", "0.0.0.0", "--port", "4000"]
-    volumes:
-      - ./logs:/app/logs
-      - ./config.yaml:/app/config.yaml
-      - ./wanted_litellm.py:/app/wanted_litellm.py
-      - ./start_litellm.py:/app/start_litellm.py
     networks:
       - litellm-network
 
@@ -34,6 +20,3 @@ networks:
   litellm-network:
     driver: bridge
 
-volumes:
-  logs:
-    driver: local
